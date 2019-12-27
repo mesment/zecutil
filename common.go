@@ -2,8 +2,12 @@ package zecutil
 
 import (
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"io"
 	"math"
+	"time"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 )
 
 // binaryFreeList defines a concurrent safe free list of byte slices (up to the
@@ -22,6 +26,8 @@ type binaryFreeList chan []byte
 // binaryFreeListMaxItems is the number of buffers to keep in the free
 // list to use for binary serialization and deserialization.
 const binaryFreeListMaxItems = 1024
+
+const MaxMessagePayload = (1024 * 1024 * 32) // 32MB
 
 var (
 	// binarySerializer provides a free list of buffers to use for serializing and
@@ -53,6 +59,61 @@ func (l binaryFreeList) Return(buf []byte) {
 	default:
 		// Let it go to the garbage collector.
 	}
+}
+
+// Uint8 reads a single byte from the provided reader using a buffer from the
+// free list and returns it as a uint8.
+func (l binaryFreeList) Uint8(r io.Reader) (uint8, error) {
+	buf := l.Borrow()[:1]
+	if _, err := io.ReadFull(r, buf); err != nil {
+		l.Return(buf)
+		return 0, err
+	}
+	rv := buf[0]
+	l.Return(buf)
+	return rv, nil
+}
+
+// Uint16 reads two bytes from the provided reader using a buffer from the
+// free list, converts it to a number using the provided byte order, and returns
+// the resulting uint16.
+func (l binaryFreeList) Uint16(r io.Reader, byteOrder binary.ByteOrder) (uint16, error) {
+	buf := l.Borrow()[:2]
+	if _, err := io.ReadFull(r, buf); err != nil {
+		l.Return(buf)
+		return 0, err
+	}
+	rv := byteOrder.Uint16(buf)
+	l.Return(buf)
+	return rv, nil
+}
+
+// Uint32 reads four bytes from the provided reader using a buffer from the
+// free list, converts it to a number using the provided byte order, and returns
+// the resulting uint32.
+func (l binaryFreeList) Uint32(r io.Reader, byteOrder binary.ByteOrder) (uint32, error) {
+	buf := l.Borrow()[:4]
+	if _, err := io.ReadFull(r, buf); err != nil {
+		l.Return(buf)
+		return 0, err
+	}
+	rv := byteOrder.Uint32(buf)
+	l.Return(buf)
+	return rv, nil
+}
+
+// Uint64 reads eight bytes from the provided reader using a buffer from the
+// free list, converts it to a number using the provided byte order, and returns
+// the resulting uint64.
+func (l binaryFreeList) Uint64(r io.Reader, byteOrder binary.ByteOrder) (uint64, error) {
+	buf := l.Borrow()[:8]
+	if _, err := io.ReadFull(r, buf); err != nil {
+		l.Return(buf)
+		return 0, err
+	}
+	rv := byteOrder.Uint64(buf)
+	l.Return(buf)
+	return rv, nil
 }
 
 // PutUint8 copies the provided uint8 into a buffer from the free list and
@@ -140,3 +201,197 @@ func WriteVarBytes(w io.Writer, pver uint32, bytes []byte) error {
 	_, err = w.Write(bytes)
 	return err
 }
+
+
+// ReadVarInt reads a variable length integer from r and returns it as a uint64.
+func ReadVarInt(r io.Reader, pver uint32) (uint64, error) {
+	discriminant, err := binarySerializer.Uint8(r)
+	if err != nil {
+		return 0, err
+	}
+
+	var rv uint64
+	switch discriminant {
+	case 0xff:
+		sv, err := binarySerializer.Uint64(r, littleEndian)
+		if err != nil {
+			return 0, err
+		}
+		rv = sv
+
+		// The encoding is not canonical if the value could have been
+		// encoded using fewer bytes.
+		min := uint64(0x100000000)
+		if rv < min {
+			return 0, errors.New("ReadVarInt  error")
+		}
+
+	case 0xfe:
+		sv, err := binarySerializer.Uint32(r, littleEndian)
+		if err != nil {
+			return 0, err
+		}
+		rv = uint64(sv)
+
+		// The encoding is not canonical if the value could have been
+		// encoded using fewer bytes.
+		min := uint64(0x10000)
+		if rv < min {
+			return 0, errors.New("ReadVarInt  error")
+		}
+
+	case 0xfd:
+		sv, err := binarySerializer.Uint16(r, littleEndian)
+		if err != nil {
+			return 0, err
+		}
+		rv = uint64(sv)
+
+		// The encoding is not canonical if the value could have been
+		// encoded using fewer bytes.
+		min := uint64(0xfd)
+		if rv < min {
+			return 0, errors.New("ReadVarInt  error")
+		}
+
+	default:
+		rv = uint64(discriminant)
+	}
+
+	return rv, nil
+}
+
+
+// ReadVarBytes reads a variable length byte array.  A byte array is encoded
+// as a varInt containing the length of the array followed by the bytes
+// themselves.  An error is returned if the length is greater than the
+// passed maxAllowed parameter which helps protect against memory exhaustion
+// attacks and forced panics through malformed messages.  The fieldName
+// parameter is only used for the error message so it provides more context in
+// the error.
+func ReadVarBytes(r io.Reader, pver uint32, maxAllowed uint32,
+	fieldName string) ([]byte, error) {
+
+	count, err := ReadVarInt(r, pver)
+	if err != nil {
+		return nil, err
+	}
+
+	// Prevent byte array larger than the max message size.  It would
+	// be possible to cause memory exhaustion and panics without a sane
+	// upper bound on this count.
+	if count > uint64(maxAllowed) {
+		str := fmt.Sprintf("%s is larger than the max allowed size "+
+			"[count %d, max %d]", fieldName, count, maxAllowed)
+		return nil, errors.New(fmt.Sprintf("ReadVarBytes error: %s", str))
+	}
+
+	b := make([]byte, count)
+	_, err = io.ReadFull(r, b)
+	if err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+// uint32Time represents a unix timestamp encoded with a uint32.  It is used as
+// a way to signal the readElement function how to decode a timestamp into a Go
+// time.Time since it is otherwise ambiguous.
+type uint32Time time.Time
+
+// int64Time represents a unix timestamp encoded with an int64.  It is used as
+// a way to signal the readElement function how to decode a timestamp into a Go
+// time.Time since it is otherwise ambiguous.
+type int64Time time.Time
+
+// readElement reads the next sequence of bytes from r using little endian
+// depending on the concrete type of element pointed to.
+func readElement(r io.Reader, element interface{}) error {
+	// Attempt to read the element based on the concrete type via fast
+	// type assertions first.
+	switch e := element.(type) {
+	case *int32:
+		rv, err := binarySerializer.Uint32(r, littleEndian)
+		if err != nil {
+			return err
+		}
+		*e = int32(rv)
+		return nil
+
+	case *uint32:
+		rv, err := binarySerializer.Uint32(r, littleEndian)
+		if err != nil {
+			return err
+		}
+		*e = rv
+		return nil
+
+	case *int64:
+		rv, err := binarySerializer.Uint64(r, littleEndian)
+		if err != nil {
+			return err
+		}
+		*e = int64(rv)
+		return nil
+
+	case *uint64:
+		rv, err := binarySerializer.Uint64(r, littleEndian)
+		if err != nil {
+			return err
+		}
+		*e = rv
+		return nil
+
+	case *bool:
+		rv, err := binarySerializer.Uint8(r)
+		if err != nil {
+			return err
+		}
+		if rv == 0x00 {
+			*e = false
+		} else {
+			*e = true
+		}
+		return nil
+
+	// Unix timestamp encoded as a uint32.
+	case *uint32Time:
+		rv, err := binarySerializer.Uint32(r, binary.LittleEndian)
+		if err != nil {
+			return err
+		}
+		*e = uint32Time(time.Unix(int64(rv), 0))
+		return nil
+
+	// Unix timestamp encoded as an int64.
+	case *int64Time:
+		rv, err := binarySerializer.Uint64(r, binary.LittleEndian)
+		if err != nil {
+			return err
+		}
+		*e = int64Time(time.Unix(int64(rv), 0))
+		return nil
+
+	// Message header checksum.
+	case *[4]byte:
+		_, err := io.ReadFull(r, e[:])
+		if err != nil {
+			return err
+		}
+		return nil
+
+	case *chainhash.Hash:
+		_, err := io.ReadFull(r, e[:])
+		if err != nil {
+			return err
+		}
+		return nil
+
+	}
+
+	// Fall back to the slower binary.Read if a fast path was not available
+	// above.
+	return binary.Read(r, littleEndian, element)
+}
+
+
