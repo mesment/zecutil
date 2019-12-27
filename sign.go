@@ -273,7 +273,7 @@ func blake2bSignatureHash(
 	binary.LittleEndian.PutUint32(bHashType[:], uint32(hashType))
 	sigHash.Write(bHashType[:])
 
-	if idx != math.MaxUint32 {
+	if uint32(idx) != math.MaxUint32 {
 		// << prevout
 		// Next, write the outpoint being spent.
 		sigHash.Write(tx.TxIn[idx].PreviousOutPoint.Hash[:])
