@@ -161,30 +161,11 @@ func (msg *MsgTx) ZecDecode(r io.Reader,pver uint32) ( err error){
 	}
 	msg.Version = int32(version &  0x7FFFFFFF)
 
-	fmt.Printf("bversion:%x",uint32(msg.Version)|(1<<31))
-	//msg.Version = int32(version)
-	fmt.Printf("version:%d, msg version:%d\n",version, msg.Version)
-	versionGroupID,err := binarySerializer.Uint32(r, littleEndian)
-	if err != nil {
-		fmt.Println("read versionGroupID error:", err)
-		return err
-	}
-	fmt.Printf("versionGroupID:%x \n", versionGroupID)
-
-	/*
-	//Witness 2 bytes
-	witBtyes ,err := binarySerializer.Uint16(r, littleEndian)
-	if err != nil {
-		fmt.Println("read witBtyes error:", err)
-		return err
-	}
-	fmt.Printf("Witness:%v \n", witBtyes)
-
-	 */
+	// read  versionGroupID
+	binarySerializer.Uint32(r, littleEndian)
 
 	count, err := ReadVarInt(r, pver)
 	if err != nil {
-		fmt.Println("ReadVarInt error", err)
 		return err
 	}
 	// returnScriptBuffers is a closure that returns any script buffers that
@@ -225,18 +206,12 @@ func (msg *MsgTx) ZecDecode(r io.Reader,pver uint32) ( err error){
 		}
 		totalScriptSize += uint64(len(ti.SignatureScript))
 	}
-	fmt.Println("ReadTxIn finish")
-	fmt.Printf("msg.TxIn: %v \n", msg.TxIn)
-	for i, v := range msg.TxIn {
-		fmt.Printf("msg.TxIn: %d, %v \n", i, v)
-	}
+
 	count, err = ReadVarInt(r, pver)
 	if err != nil {
 		returnScriptBuffers()
 		return err
 	}
-
-	fmt.Printf("vout count:%d\n", count)
 
 	// Deserialize the outputs.
 	txOuts := make([]wire.TxOut, count)
@@ -254,24 +229,18 @@ func (msg *MsgTx) ZecDecode(r io.Reader,pver uint32) ( err error){
 		totalScriptSize += uint64(len(to.PkScript))
 	}
 
-	fmt.Println("ReadTxOut finish")
-	for i, v := range msg.TxOut {
-		fmt.Printf("msg.TxOut: %d, %v \n", i, v)
-	}
-
 	msg.LockTime, err = binarySerializer.Uint32(r, littleEndian)
 	if err != nil {
 		returnScriptBuffers()
 		return err
 	}
-	fmt.Println("Read LockTime finish")
+
 	msg.ExpiryHeight, err = binarySerializer.Uint32(r, littleEndian)
 	if err != nil {
 		returnScriptBuffers()
 		return err
 	}
-	fmt.Printf("msg ExpiryHeight:%d\n", msg.ExpiryHeight)
-	fmt.Println("Read ExpiryHeight finish")
+
 	// Create a single allocation to house all of the scripts and set each
 	// input signature script and output public key script to the
 	// appropriate subslice of the overall contiguous buffer.  Then, return
@@ -305,8 +274,6 @@ func (msg *MsgTx) ZecDecode(r io.Reader,pver uint32) ( err error){
 		scriptPool.Return(signatureScript)
 	}
 
-	fmt.Println("txin script finish")
-
 	for i := 0; i < len(msg.TxOut); i++ {
 		// Copy the public key script into the contiguous buffer at the
 		// appropriate offset.
@@ -323,8 +290,6 @@ func (msg *MsgTx) ZecDecode(r io.Reader,pver uint32) ( err error){
 		// Return the temporary script buffer to the pool.
 		scriptPool.Return(pkScript)
 	}
-	fmt.Println("txout script finish")
-	//
 
 	return nil
 }
